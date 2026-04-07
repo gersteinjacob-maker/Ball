@@ -81,7 +81,8 @@
       height: 70px;
       border-radius: 50%;
       background: radial-gradient(circle at 30% 30%, #ff7474, var(--ball) 65%, #9d1111 100%);
-      will-change: top, left, width, height, border-radius;
+      will-change: top, left, width, height, border-radius, transform;
+      transform-origin: center center;
       box-shadow: 0 10px 18px rgba(0,0,0,0.18);
       cursor: grab;
     }
@@ -126,7 +127,7 @@
       <div class="ball" id="ball"></div>
       <div class="floor"></div>
     </div>
-    <div class="note">Drag the red ball with your cursor and throw it at the walls, ceiling, or floor. Reset restarts the full five-minute bounce sequence.</div>
+    <div class="note">Drag the slime-like red ball with your cursor and throw it at the walls, ceiling, or floor. Light wall hits slip off, harder hits cling and droop before falling. Reset restarts the full five-minute bounce sequence.</div>
   </div>
 
   <script>
@@ -137,7 +138,7 @@
 
     const BALL_BASE = 70;
     const FLOOR_HEIGHT = 64;
-    const TOTAL_DURATION = 300; // seconds, target settle time when left alone
+    const TOTAL_DURATION = 300;
     const MAX_THROW_SPEED = 2400;
 
     let rafId = null;
@@ -154,8 +155,28 @@
       radius: BALL_BASE / 2,
       squashX: 1,
       squashY: 1,
-      bouncePeak: 0,
-      settled: false
+      stretchAngle: 0,
+      shadowShift: 0,
+      settled: false,
+      stick: {
+        active: false,
+        surface: null,
+        timer: 0,
+        duration: 0,
+        droop: 0,
+        releaseDroop: 0,
+        anchorX: 0,
+        anchorY: 0,
+        hard: false,
+        intensity: 0
+      },
+      dragVisual: {
+        x: 0,
+        y: 0,
+        lagX: 0,
+        lagY: 0,
+        active: false
+      }
     };
 
     function getMetrics() {
@@ -177,9 +198,10 @@
         (TOTAL_DURATION + (2 * startSpeed / gravity));
       return {
         gravity,
+        startSpeed,
         restitutionFloor: Math.min(0.997, Math.max(0.985, restitutionFloor)),
-        restitutionWall: 0.94,
-        restitutionCeiling: 0.94,
+        restitutionWall: 0.9,
+        restitutionCeiling: 0.9,
         airDrag: 0.9993,
         rollDrag: 0.985
       };
@@ -189,17 +211,33 @@
       return Math.max(min, Math.min(max, value));
     }
 
+    function resetStick() {
+      ballState.stick.active = false;
+      ballState.stick.surface = null;
+      ballState.stick.timer = 0;
+      ballState.stick.duration = 0;
+      ballState.stick.droop = 0;
+      ballState.stick.releaseDroop = 0;
+      ballState.stick.anchorX = 0;
+      ballState.stick.anchorY = 0;
+      ballState.stick.hard = false;
+      ballState.stick.intensity = 0;
+    }
+
     function resetBall() {
       const { rect, floor } = getMetrics();
       const physics = getPhysicsConstants();
+      resetStick();
       ballState.x = rect.width * 0.5;
       ballState.y = floor - ballState.radius;
       ballState.vx = 0;
       ballState.vy = -physics.startSpeed;
       ballState.squashX = 1;
       ballState.squashY = 1;
-      ballState.bouncePeak = 1;
+      ballState.stretchAngle = 0;
+      ballState.shadowShift = 0;
       ballState.settled = false;
+      ballState.dragVisual.active = false;
       dragSamples = [];
       renderBall();
     }
@@ -210,20 +248,23 @@
       const yScale = ballState.squashY;
       const width = BALL_BASE * xScale;
       const height = BALL_BASE * yScale;
-      const left = ballState.x - width / 2;
-      const top = ballState.y - height / 2;
+      const visualX = ballState.dragVisual.active ? ballState.dragVisual.x : ballState.x;
+      const visualY = ballState.dragVisual.active ? ballState.dragVisual.y : ballState.y;
+      const left = visualX - width / 2;
+      const top = visualY - height / 2;
 
       ball.style.width = width + 'px';
       ball.style.height = height + 'px';
       ball.style.left = left + 'px';
       ball.style.top = top + 'px';
-      ball.style.borderRadius = `${50 + (1 - yScale) * 8}%`;
+      ball.style.borderRadius = `${50 + (1 - yScale) * 10}%`;
+      ball.style.transform = `rotate(${ballState.stretchAngle}rad)`;
 
       const heightRatio = clamp((floor - (ballState.y + ballState.radius)) / Math.max(1, floor - BALL_BASE), 0, 1);
       const shadowWidth = 42 + (1 - heightRatio) * 32 + Math.abs(ballState.vx) * 0.004;
       const shadowOpacity = 0.12 + (1 - heightRatio) * 0.25;
       const shadowScale = 0.8 + (1 - yScale) * 0.35;
-      const shadowLeft = clamp(ballState.x - shadowWidth / 2, 8, rightWall - shadowWidth - 8);
+      const shadowLeft = clamp(ballState.x - shadowWidth / 2 + ballState.shadowShift, 8, rightWall - shadowWidth - 8);
 
       shadow.style.bottom = (FLOOR_HEIGHT - 8) + 'px';
       shadow.style.left = shadowLeft + 'px';
@@ -233,19 +274,105 @@
     }
 
     function updateSquash(dt, impactAxis = null, impactSpeed = 0) {
-      const baseRecover = Math.pow(0.0007, dt);
+      const baseRecover = Math.pow(0.0008, dt);
       ballState.squashX = 1 + (ballState.squashX - 1) * baseRecover;
       ballState.squashY = 1 + (ballState.squashY - 1) * baseRecover;
+      ballState.stretchAngle *= Math.pow(0.002, dt);
+      ballState.shadowShift *= Math.pow(0.0009, dt);
 
       if (impactAxis === 'floor' || impactAxis === 'ceiling') {
         const amount = clamp(impactSpeed / 1600, 0, 0.28);
         ballState.squashY = 1 - amount;
         ballState.squashX = 1 + amount * 0.95;
       } else if (impactAxis === 'wall') {
-        const amount = clamp(impactSpeed / 1600, 0, 0.24);
+        const amount = clamp(impactSpeed / 1600, 0, 0.26);
         ballState.squashX = 1 - amount;
-        ballState.squashY = 1 + amount * 0.85;
+        ballState.squashY = 1 + amount * 0.9;
       }
+    }
+
+    function beginStickyContact(surface, impactSpeed, hitX, hitY) {
+      const { leftWall, rightWall, ceiling } = getMetrics();
+      const isHard = impactSpeed > 900;
+      const isMedium = impactSpeed > 360;
+      if (!isMedium && surface !== 'ceiling') return false;
+      if (surface === 'ceiling' && impactSpeed < 420) return false;
+
+      resetStick();
+      ballState.stick.active = true;
+      ballState.stick.surface = surface;
+      ballState.stick.timer = 0;
+      ballState.stick.duration = isHard ? clamp(0.95 + impactSpeed / 900, 1.1, 2.9) : clamp(0.28 + impactSpeed / 1500, 0.35, 0.9);
+      ballState.stick.droop = 0;
+      ballState.stick.releaseDroop = isHard ? BALL_BASE * 1.15 : BALL_BASE * 0.6;
+      ballState.stick.hard = isHard;
+      ballState.stick.intensity = clamp(impactSpeed / 1500, 0.25, 1.15);
+      ballState.vx = 0;
+      ballState.vy = 0;
+
+      if (surface === 'left') {
+        ballState.stick.anchorX = leftWall + ballState.radius * 0.78;
+        ballState.stick.anchorY = hitY;
+      } else if (surface === 'right') {
+        ballState.stick.anchorX = rightWall - ballState.radius * 0.78;
+        ballState.stick.anchorY = hitY;
+      } else {
+        ballState.stick.anchorX = hitX;
+        ballState.stick.anchorY = ceiling + ballState.radius * 0.76;
+      }
+      return true;
+    }
+
+    function updateSticky(dt) {
+      const physics = getPhysicsConstants();
+      const { floor } = getMetrics();
+      const s = ballState.stick;
+      if (!s.active) return false;
+
+      s.timer += dt;
+      const droopRate = s.hard ? 26 + (1 - s.intensity) * 10 : 75 + (1 - s.intensity) * 45;
+      s.droop += physics.gravity * dt * dt * droopRate;
+
+      if (s.surface === 'left') {
+        ballState.x = s.anchorX;
+        ballState.y = clamp(s.anchorY + s.droop, ballState.radius, floor - ballState.radius);
+        const stretch = clamp(0.14 + s.droop / 170, 0.14, 0.7);
+        ballState.squashX = 1 - stretch * 0.55;
+        ballState.squashY = 1 + stretch;
+        ballState.stretchAngle = -0.12;
+        ballState.shadowShift = -8;
+      } else if (s.surface === 'right') {
+        ballState.x = s.anchorX;
+        ballState.y = clamp(s.anchorY + s.droop, ballState.radius, floor - ballState.radius);
+        const stretch = clamp(0.14 + s.droop / 170, 0.14, 0.7);
+        ballState.squashX = 1 - stretch * 0.55;
+        ballState.squashY = 1 + stretch;
+        ballState.stretchAngle = 0.12;
+        ballState.shadowShift = 8;
+      } else if (s.surface === 'ceiling') {
+        ballState.x = s.anchorX;
+        ballState.y = s.anchorY + clamp(s.droop, 0, BALL_BASE * 1.45);
+        const stretch = clamp(0.18 + s.droop / 150, 0.18, 0.86);
+        ballState.squashX = 1 - stretch * 0.35;
+        ballState.squashY = 1 + stretch;
+        ballState.stretchAngle = 0;
+        ballState.shadowShift = 0;
+      }
+
+      const timedOut = s.timer >= s.duration;
+      const droopedOff = s.droop >= s.releaseDroop;
+      if (timedOut || droopedOff || ballState.y + ballState.radius >= floor - 1) {
+        if (s.surface === 'left') {
+          ballState.vx = 20;
+        } else if (s.surface === 'right') {
+          ballState.vx = -20;
+        } else {
+          ballState.vx *= 0.15;
+        }
+        ballState.vy = Math.min(physics.gravity * 0.18 + s.droop * 1.5, 520);
+        resetStick();
+      }
+      return true;
     }
 
     function stepPhysics(dt) {
@@ -253,7 +380,20 @@
       const physics = getPhysicsConstants();
 
       if (isDragging) {
-        updateSquash(dt);
+        ballState.dragVisual.active = true;
+        ballState.dragVisual.lagX += (ballState.x - ballState.dragVisual.x) * Math.min(1, dt * 26);
+        ballState.dragVisual.lagY += (ballState.y - ballState.dragVisual.y) * Math.min(1, dt * 18);
+        ballState.dragVisual.x += ballState.dragVisual.lagX;
+        ballState.dragVisual.y += ballState.dragVisual.lagY + physics.gravity * dt * 0.018;
+        ballState.dragVisual.x += (ballState.x - ballState.dragVisual.x) * Math.min(1, dt * 14);
+        ballState.dragVisual.y += (ballState.y + 8 - ballState.dragVisual.y) * Math.min(1, dt * 10);
+        renderBall();
+        return;
+      }
+
+      ballState.dragVisual.active = false;
+
+      if (updateSticky(dt)) {
         renderBall();
         return;
       }
@@ -271,23 +411,38 @@
       if (ballState.x - ballState.radius <= leftWall) {
         impactSpeed = Math.abs(ballState.vx);
         ballState.x = leftWall + ballState.radius;
-        ballState.vx = Math.abs(ballState.vx) * physics.restitutionWall;
-        impactAxis = 'wall';
+        const stuck = beginStickyContact('left', impactSpeed, ballState.x, ballState.y);
+        if (!stuck) {
+          ballState.vx = Math.abs(ballState.vx) * physics.restitutionWall;
+          impactAxis = 'wall';
+        } else {
+          impactAxis = 'wall';
+        }
       } else if (ballState.x + ballState.radius >= rightWall) {
         impactSpeed = Math.abs(ballState.vx);
         ballState.x = rightWall - ballState.radius;
-        ballState.vx = -Math.abs(ballState.vx) * physics.restitutionWall;
-        impactAxis = 'wall';
+        const stuck = beginStickyContact('right', impactSpeed, ballState.x, ballState.y);
+        if (!stuck) {
+          ballState.vx = -Math.abs(ballState.vx) * physics.restitutionWall;
+          impactAxis = 'wall';
+        } else {
+          impactAxis = 'wall';
+        }
       }
 
-      if (ballState.y - ballState.radius <= ceiling) {
+      if (!ballState.stick.active && ballState.y - ballState.radius <= ceiling) {
         impactSpeed = Math.max(impactSpeed, Math.abs(ballState.vy));
         ballState.y = ceiling + ballState.radius;
-        ballState.vy = Math.abs(ballState.vy) * physics.restitutionCeiling;
-        impactAxis = 'ceiling';
+        const stuck = beginStickyContact('ceiling', impactSpeed, ballState.x, ballState.y);
+        if (!stuck) {
+          ballState.vy = Math.abs(ballState.vy) * physics.restitutionCeiling;
+          impactAxis = 'ceiling';
+        } else {
+          impactAxis = 'ceiling';
+        }
       }
 
-      if (ballState.y + ballState.radius >= floor) {
+      if (!ballState.stick.active && ballState.y + ballState.radius >= floor) {
         impactSpeed = Math.max(impactSpeed, Math.abs(ballState.vy));
         ballState.y = floor - ballState.radius;
 
@@ -342,13 +497,19 @@
       const pos = getPointerPosition(event);
       const dx = pos.x - ballState.x;
       const dy = pos.y - ballState.y;
-      if ((dx * dx) + (dy * dy) > (ballState.radius * ballState.radius * 1.2)) return;
+      if ((dx * dx) + (dy * dy) > (ballState.radius * ballState.radius * 1.28)) return;
 
       isDragging = true;
       dragPointerId = event.pointerId;
       dragSamples = [pos];
+      resetStick();
       ballState.vx = 0;
       ballState.vy = 0;
+      ballState.dragVisual.active = true;
+      ballState.dragVisual.x = ballState.x;
+      ballState.dragVisual.y = ballState.y;
+      ballState.dragVisual.lagX = 0;
+      ballState.dragVisual.lagY = 0;
       scene.classList.add('grabbing');
       ball.classList.add('grabbing');
       ball.setPointerCapture(event.pointerId);
@@ -358,14 +519,22 @@
       if (!isDragging || event.pointerId !== dragPointerId) return;
       const { leftWall, rightWall, ceiling, floor } = getMetrics();
       const pos = getPointerPosition(event);
+      const prev = dragSamples[dragSamples.length - 1] || pos;
+      const dx = pos.x - prev.x;
+      const dy = pos.y - prev.y;
 
       ballState.x = clamp(pos.x, leftWall + ballState.radius, rightWall - ballState.radius);
       ballState.y = clamp(pos.y, ceiling + ballState.radius, floor - ballState.radius);
-      ballState.squashX = 1.04;
-      ballState.squashY = 0.96;
+
+      const travel = Math.hypot(dx, dy);
+      const stretch = clamp(0.1 + Math.abs(dy) * 0.01 + travel * 0.006, 0.12, 0.62);
+      ballState.squashX = 1 - stretch * 0.38;
+      ballState.squashY = 1 + stretch * 0.72;
+      ballState.stretchAngle = clamp(Math.atan2(dy + 18, dx || 0.001) - Math.PI / 2, -0.55, 0.55);
+      ballState.shadowShift = clamp(dx * 0.35, -18, 18);
 
       dragSamples.push(pos);
-      while (dragSamples.length > 8) dragSamples.shift();
+      while (dragSamples.length > 10) dragSamples.shift();
       renderBall();
     }
 
@@ -395,6 +564,7 @@
 
       ballState.vx = rawVx * scale;
       ballState.vy = rawVy * scale;
+      ballState.dragVisual.active = false;
       dragPointerId = null;
       dragSamples = [];
     }
@@ -411,6 +581,10 @@
       const { leftWall, rightWall, ceiling, floor } = getMetrics();
       ballState.x = clamp(ballState.x, leftWall + ballState.radius, rightWall - ballState.radius);
       ballState.y = clamp(ballState.y, ceiling + ballState.radius, floor - ballState.radius);
+      if (ballState.dragVisual.active) {
+        ballState.dragVisual.x = ballState.x;
+        ballState.dragVisual.y = ballState.y;
+      }
       renderBall();
     });
 
