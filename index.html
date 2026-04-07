@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bouncing Ball Simulation</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --floor: #9a9a9a;
+      --ball: #d61f1f;
+      --text: #222;
+      --button: #f2f2f2;
+      --button-border: #bdbdbd;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .wrap {
+      width: min(900px, 92vw);
+      text-align: center;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+
+    .controls {
+      margin-bottom: 14px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--button-border);
+      background: var(--button);
+      color: var(--text);
+      padding: 10px 18px;
+      font-size: 1rem;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: transform 0.08s ease, background 0.15s ease;
+    }
+
+    button:hover { background: #e9e9e9; }
+    button:active { transform: scale(0.97); }
+
+    .scene {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: linear-gradient(to bottom, #fafafa 0%, #f3f3f3 100%);
+      border: 1px solid #d8d8d8;
+      border-radius: 16px;
+      overflow: hidden;
+    }
+
+    .ball {
+      position: absolute;
+      width: 70px;
+      height: 70px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #ff7474, var(--ball) 65%, #9d1111 100%);
+      left: 50%;
+      transform: translateX(-50%);
+      will-change: top, width, height, border-radius;
+      box-shadow: 0 10px 18px rgba(0,0,0,0.18);
+    }
+
+    .shadow {
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      height: 16px;
+      width: 46px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.18);
+      filter: blur(2px);
+      will-change: transform, opacity, width;
+    }
+
+    .floor {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 64px;
+      background: linear-gradient(to bottom, #ababab 0%, var(--floor) 55%, #7a7a7a 100%);
+      border-top: 2px solid #8b8b8b;
+    }
+
+    .note {
+      margin-top: 10px;
+      font-size: 0.95rem;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Bouncing Ball Simulation</h1>
+    <div class="controls">
+      <button id="resetBtn">Reset</button>
+    </div>
+    <div class="scene" id="scene">
+      <div class="shadow" id="shadow"></div>
+      <div class="ball" id="ball"></div>
+      <div class="floor"></div>
+    </div>
+    <div class="note">A red ball bounces for about five minutes, slowly losing height and speed until it stops.</div>
+  </div>
+
+  <script>
+    const scene = document.getElementById('scene');
+    const ball = document.getElementById('ball');
+    const shadow = document.getElementById('shadow');
+    const resetBtn = document.getElementById('resetBtn');
+
+    let rafId = null;
+    let startTime = 0;
+
+    const TOTAL_DURATION = 300000; // 5 minutes in ms
+    const BALL_BASE = 70;
+    const FLOOR_HEIGHT = 64;
+
+    // Bounce timing profile:
+    // Starts energetic and high, then gradually settles.
+    // Durations increase slightly later so the last tiny bounces stretch out and
+    // the full sequence lands near five minutes.
+    const bounces = [];
+
+    function buildBounceTimeline() {
+      bounces.length = 0;
+
+      let time = 0;
+      let height = 0.86;      // relative max height of scene usable area
+      let duration = 1200;    // ms for first bounce cycle
+      let impact = 0.16;      // squash amount on impact
+      let i = 0;
+
+      while (time < TOTAL_DURATION - 1000) {
+        // Height decays a bit faster at first, then more gently later.
+        const decay = i < 8 ? 0.86 : i < 24 ? 0.91 : 0.955;
+        const durationGrowth = i < 8 ? 1.035 : i < 24 ? 1.06 : 1.085;
+        const squashDecay = i < 18 ? 0.97 : 0.985;
+
+        bounces.push({
+          start: time,
+          duration,
+          peak: Math.max(height, 0),
+          squash: Math.max(impact, 0.025)
+        });
+
+        time += duration;
+        height *= decay;
+        duration *= durationGrowth;
+        impact *= squashDecay;
+        i += 1;
+
+        if (height < 0.0025 && time > TOTAL_DURATION * 0.9) break;
+      }
+
+      // Force exact end at 5 minutes by adjusting the last bounce duration.
+      if (bounces.length > 0) {
+        const currentEnd = bounces[bounces.length - 1].start + bounces[bounces.length - 1].duration;
+        const diff = TOTAL_DURATION - currentEnd;
+        bounces[bounces.length - 1].duration += diff;
+      }
+    }
+
+    function easeOutCubic(x) {
+      return 1 - Math.pow(1 - x, 3);
+    }
+
+    function getSceneMetrics() {
+      const rect = scene.getBoundingClientRect();
+      const usableHeight = rect.height - FLOOR_HEIGHT - BALL_BASE - 8;
+      const floorY = rect.height - FLOOR_HEIGHT - BALL_BASE;
+      return { rect, usableHeight, floorY };
+    }
+
+    function render(elapsed) {
+      const { usableHeight, floorY } = getSceneMetrics();
+
+      if (elapsed >= TOTAL_DURATION) {
+        placeBall(floorY, 1, 0.05);
+        rafId = null;
+        return;
+      }
+
+      let bounce = bounces[bounces.length - 1];
+      for (let i = 0; i < bounces.length; i++) {
+        const b = bounces[i];
+        if (elapsed >= b.start && elapsed <= b.start + b.duration) {
+          bounce = b;
+          break;
+        }
+      }
+
+      const t = (elapsed - bounce.start) / bounce.duration;
+      const phase = Math.min(Math.max(t, 0), 1);
+
+      // Smooth bounce arc: 0 at floor, 1 at peak, 0 at floor.
+      const arc = Math.sin(Math.PI * phase);
+      const upwardBias = phase < 0.5 ? easeOutCubic(phase * 2) : easeOutCubic((1 - phase) * 2);
+      const effectiveArc = 0.72 * arc + 0.28 * upwardBias;
+      const y = floorY - bounce.peak * usableHeight * effectiveArc;
+
+      // Slight compression near impact.
+      const impactWindow = Math.min(phase, 1 - phase) / 0.12;
+      const proximityToImpact = 1 - Math.min(impactWindow, 1);
+      const squash = bounce.squash * proximityToImpact;
+
+      placeBall(y, 1 - squash, bounce.peak);
+
+      rafId = requestAnimationFrame((ts) => animate(ts));
+    }
+
+    function placeBall(topY, verticalScale, peak) {
+      const compressionX = 1 + (1 - verticalScale) * 0.9;
+      const width = BALL_BASE * compressionX;
+      const height = BALL_BASE * verticalScale;
+      const leftOffset = (BALL_BASE - width) / 2;
+
+      ball.style.width = width + 'px';
+      ball.style.height = height + 'px';
+      ball.style.top = (topY + (BALL_BASE - height)) + 'px';
+      ball.style.marginLeft = leftOffset + 'px';
+      ball.style.borderRadius = `${50 + (1 - verticalScale) * 8}%`;
+
+      const shadowWidth = 42 + (1 - peak) * 32;
+      const shadowOpacity = 0.1 + (1 - peak) * 0.24;
+      const shadowScale = 0.82 + (1 - verticalScale) * 0.28;
+
+      shadow.style.bottom = (FLOOR_HEIGHT - 8) + 'px';
+      shadow.style.width = shadowWidth + 'px';
+      shadow.style.opacity = shadowOpacity.toFixed(3);
+      shadow.style.transform = `translateX(-50%) scale(${shadowScale})`;
+    }
+
+    function animate(timestamp) {
+      if (!startTime) startTime = timestamp;
+      const elapsed = timestamp - startTime;
+      render(elapsed);
+    }
+
+    function resetSimulation() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+      startTime = 0;
+      buildBounceTimeline();
+      const { floorY } = getSceneMetrics();
+      placeBall(floorY, 1, bounces[0]?.peak ?? 0.8);
+      rafId = requestAnimationFrame((ts) => animate(ts));
+    }
+
+    window.addEventListener('resize', () => {
+      const elapsed = startTime ? performance.now() - startTime : 0;
+      if (!startTime) {
+        const { floorY } = getSceneMetrics();
+        placeBall(floorY, 1, bounces[0]?.peak ?? 0.8);
+      } else {
+        render(Math.min(elapsed, TOTAL_DURATION));
+      }
+    });
+
+    resetBtn.addEventListener('click', resetSimulation);
+
+    buildBounceTimeline();
+    resetSimulation();
+  </script>
+</body>
+</html>
